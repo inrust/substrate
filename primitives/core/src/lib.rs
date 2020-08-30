@@ -50,9 +50,9 @@ pub use impl_serde::serialize as bytes;
 
 #[cfg(feature = "full_crypto")]
 pub mod hashing;
+
 #[cfg(feature = "full_crypto")]
 pub use hashing::{blake2_128, blake2_256, twox_64, twox_128, twox_256, keccak_256};
-#[cfg(feature = "std")]
 pub mod hexdisplay;
 pub mod crypto;
 
@@ -72,7 +72,7 @@ mod changes_trie;
 pub mod traits;
 pub mod testing;
 #[cfg(feature = "std")]
-pub mod tasks;
+pub mod vrf;
 
 pub use self::hash::{H160, H256, H512, convert_hash};
 pub use self::uint::{U256, U512};
@@ -330,6 +330,11 @@ pub fn to_substrate_wasm_fn_return_value(value: &impl Encode) -> u64 {
 
 	res
 }
+
+/// The void type - it cannot exist.
+// Oh rust, you crack me up...
+#[derive(Clone, Decode, Encode, Eq, PartialEq, RuntimeDebug)]
+pub enum Void {}
 
 /// Macro for creating `Maybe*` marker traits.
 ///
