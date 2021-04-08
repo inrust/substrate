@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,8 +17,8 @@
 
 //! # Democracy Pallet
 //!
-//! - [`democracy::Trait`](./trait.Trait.html)
-//! - [`Call`](./enum.Call.html)
+//! - [`Config`]
+//! - [`Call`]
 //!
 //! ## Overview
 //!
@@ -162,7 +162,7 @@ use frame_support::{
 	decl_module, decl_storage, decl_event, decl_error, ensure, Parameter,
 	weights::{Weight, DispatchClass, Pays},
 	traits::{
-		Currency, ReservableCurrency, LockableCurrency, WithdrawReason, LockIdentifier, Get,
+		Currency, ReservableCurrency, LockableCurrency, WithdrawReasons, LockIdentifier, Get,
 		OnUnbalanced, BalanceStatus, schedule::{Named as ScheduleNamed, DispatchTime}, EnsureOrigin
 	},
 	dispatch::DispatchResultWithPostInfo,
@@ -173,7 +173,8 @@ mod vote_threshold;
 mod vote;
 mod conviction;
 mod types;
-mod default_weight;
+pub mod weights;
+pub use weights::WeightInfo;
 pub use vote_threshold::{Approved, VoteThreshold};
 pub use vote::{Vote, AccountVote, Voting};
 pub use conviction::Conviction;
@@ -198,41 +199,13 @@ pub type PropIndex = u32;
 /// A referendum index.
 pub type ReferendumIndex = u32;
 
-type BalanceOf<T> = <<T as Trait>::Currency as Currency<<T as frame_system::Trait>::AccountId>>::Balance;
+type BalanceOf<T> = <<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
 type NegativeImbalanceOf<T> =
-	<<T as Trait>::Currency as Currency<<T as frame_system::Trait>::AccountId>>::NegativeImbalance;
+	<<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::NegativeImbalance;
 
-pub trait WeightInfo {
-	fn propose() -> Weight;
-	fn second(s: u32, ) -> Weight;
-	fn vote_new(r: u32, ) -> Weight;
-	fn vote_existing(r: u32, ) -> Weight;
-	fn emergency_cancel() -> Weight;
-	fn blacklist(p: u32, ) -> Weight;
-	fn external_propose(v: u32, ) -> Weight;
-	fn external_propose_majority() -> Weight;
-	fn external_propose_default() -> Weight;
-	fn fast_track() -> Weight;
-	fn veto_external(v: u32, ) -> Weight;
-	fn cancel_referendum() -> Weight;
-	fn cancel_proposal(p: u32, ) -> Weight;
-	fn cancel_queued(r: u32, ) -> Weight;
-	fn on_initialize_base(r: u32, ) -> Weight;
-	fn delegate(r: u32, ) -> Weight;
-	fn undelegate(r: u32, ) -> Weight;
-	fn clear_public_proposals() -> Weight;
-	fn note_preimage(b: u32, ) -> Weight;
-	fn note_imminent_preimage(b: u32, ) -> Weight;
-	fn reap_preimage(b: u32, ) -> Weight;
-	fn unlock_remove(r: u32, ) -> Weight;
-	fn unlock_set(r: u32, ) -> Weight;
-	fn remove_vote(r: u32, ) -> Weight;
-	fn remove_other_vote(r: u32, ) -> Weight;
-}
-
-pub trait Trait: frame_system::Trait + Sized {
+pub trait Config: frame_system::Config + Sized {
 	type Proposal: Parameter + Dispatchable<Origin=Self::Origin> + From<Call<Self>>;
-	type Event: From<Event<Self>> + Into<<Self as frame_system::Trait>::Event>;
+	type Event: From<Event<Self>> + Into<<Self as frame_system::Config>::Event>;
 
 	/// Currency type for this module.
 	type Currency: ReservableCurrency<Self::AccountId>
@@ -365,7 +338,7 @@ enum Releases {
 }
 
 decl_storage! {
-	trait Store for Module<T: Trait> as Democracy {
+	trait Store for Module<T: Config> as Democracy {
 		// TODO: Refactor public proposal queue into its own pallet.
 		// https://github.com/paritytech/substrate/issues/5322
 		/// The number of (public) proposals that have been made so far.
@@ -440,9 +413,9 @@ decl_storage! {
 decl_event! {
 	pub enum Event<T> where
 		Balance = BalanceOf<T>,
-		<T as frame_system::Trait>::AccountId,
-		<T as frame_system::Trait>::Hash,
-		<T as frame_system::Trait>::BlockNumber,
+		<T as frame_system::Config>::AccountId,
+		<T as frame_system::Config>::Hash,
+		<T as frame_system::Config>::BlockNumber,
 	{
 		/// A motion has been proposed by a public account. \[proposal_index, deposit\]
 		Proposed(PropIndex, Balance),
@@ -488,7 +461,7 @@ decl_event! {
 }
 
 decl_error! {
-	pub enum Error for Module<T: Trait> {
+	pub enum Error for Module<T: Config> {
 		/// Value too low
 		ValueLow,
 		/// Proposal does not exist
@@ -564,7 +537,7 @@ decl_error! {
 }
 
 decl_module! {
-	pub struct Module<T: Trait> for enum Call where origin: T::Origin {
+	pub struct Module<T: Config> for enum Call where origin: T::Origin {
 		type Error = Error<T>;
 
 		/// The minimum period of locking and the period between a proposal being approved and enacted.
@@ -623,7 +596,7 @@ decl_module! {
 
 			if let Some((until, _)) = <Blacklist<T>>::get(proposal_hash) {
 				ensure!(
-					<frame_system::Module<T>>::block_number() >= until,
+					<frame_system::Pallet<T>>::block_number() >= until,
 					Error::<T>::ProposalBlacklisted,
 				);
 			}
@@ -715,7 +688,7 @@ decl_module! {
 			ensure!(!<NextExternal<T>>::exists(), Error::<T>::DuplicateProposal);
 			if let Some((until, _)) = <Blacklist<T>>::get(proposal_hash) {
 				ensure!(
-					<frame_system::Module<T>>::block_number() >= until,
+					<frame_system::Pallet<T>>::block_number() >= until,
 					Error::<T>::ProposalBlacklisted,
 				);
 			}
@@ -803,7 +776,7 @@ decl_module! {
 			ensure!(proposal_hash == e_proposal_hash, Error::<T>::InvalidHash);
 
 			<NextExternal<T>>::kill();
-			let now = <frame_system::Module<T>>::block_number();
+			let now = <frame_system::Pallet<T>>::block_number();
 			Self::inject_referendum(now + voting_period, proposal_hash, threshold, delay);
 		}
 
@@ -833,7 +806,7 @@ decl_module! {
 				.err().ok_or(Error::<T>::AlreadyVetoed)?;
 
 			existing_vetoers.insert(insert_position, who.clone());
-			let until = <frame_system::Module<T>>::block_number() + T::CooloffPeriod::get();
+			let until = <frame_system::Pallet<T>>::block_number() + T::CooloffPeriod::get();
 			<Blacklist<T>>::insert(&proposal_hash, (until, existing_vetoers));
 
 			Self::deposit_event(RawEvent::Vetoed(who, proposal_hash, until));
@@ -1031,13 +1004,14 @@ decl_module! {
 					_ => None,
 				}).ok_or(Error::<T>::PreimageMissing)?;
 
-			let now = <frame_system::Module<T>>::block_number();
+			let now = <frame_system::Pallet<T>>::block_number();
 			let (voting, enactment) = (T::VotingPeriod::get(), T::EnactmentPeriod::get());
 			let additional = if who == provider { Zero::zero() } else { enactment };
 			ensure!(now >= since + voting + additional, Error::<T>::TooEarly);
 			ensure!(expiry.map_or(true, |e| now > e), Error::<T>::Imminent);
 
-			let _ = T::Currency::repatriate_reserved(&provider, &who, deposit, BalanceStatus::Free);
+			let res = T::Currency::repatriate_reserved(&provider, &who, deposit, BalanceStatus::Free);
+			debug_assert!(res.is_ok());
 			<Preimages<T>>::remove(&proposal_hash);
 			Self::deposit_event(RawEvent::PreimageReaped(proposal_hash, provider, deposit, who));
 		}
@@ -1113,7 +1087,7 @@ decl_module! {
 		}
 
 		/// Enact a proposal from a referendum. For now we just make the weight be the maximum.
-		#[weight = T::MaximumBlockWeight::get()]
+		#[weight = T::BlockWeights::get().max_block]
 		fn enact_proposal(origin, proposal_hash: T::Hash, index: ReferendumIndex) -> DispatchResult {
 			ensure_root(origin)?;
 			Self::do_enact_proposal(proposal_hash, index)
@@ -1195,7 +1169,7 @@ decl_module! {
 	}
 }
 
-impl<T: Trait> Module<T> {
+impl<T: Config> Module<T> {
 	// exposed immutables.
 
 	/// Get the amount locked in support of `proposal`; `None` if proposal isn't a valid proposal
@@ -1236,7 +1210,7 @@ impl<T: Trait> Module<T> {
 		delay: T::BlockNumber
 	) -> ReferendumIndex {
 		<Module<T>>::inject_referendum(
-			<frame_system::Module<T>>::block_number() + T::VotingPeriod::get(),
+			<frame_system::Pallet<T>>::block_number() + T::VotingPeriod::get(),
 			proposal_hash,
 			threshold,
 			delay
@@ -1305,7 +1279,7 @@ impl<T: Trait> Module<T> {
 			DEMOCRACY_ID,
 			who,
 			vote.balance(),
-			WithdrawReason::Transfer.into()
+			WithdrawReasons::TRANSFER
 		);
 		ReferendumInfoOf::<T>::insert(ref_index, ReferendumInfo::Ongoing(status));
 		Ok(())
@@ -1335,7 +1309,7 @@ impl<T: Trait> Module<T> {
 					Some(ReferendumInfo::Finished{end, approved}) =>
 						if let Some((lock_periods, balance)) = votes[i].1.locked_if(approved) {
 							let unlock_at = end + T::EnactmentPeriod::get() * lock_periods.into();
-							let now = system::Module::<T>::block_number();
+							let now = system::Pallet::<T>::block_number();
 							if now < unlock_at {
 								ensure!(matches!(scope, UnvoteScope::Any), Error::<T>::NoPermission);
 								prior.accumulate(unlock_at, balance)
@@ -1437,7 +1411,7 @@ impl<T: Trait> Module<T> {
 				DEMOCRACY_ID,
 				&who,
 				balance,
-				WithdrawReason::Transfer.into()
+				WithdrawReasons::TRANSFER
 			);
 			Ok(votes)
 		})?;
@@ -1462,7 +1436,7 @@ impl<T: Trait> Module<T> {
 				} => {
 					// remove any delegation votes to our current target.
 					let votes = Self::reduce_upstream_delegation(&target, conviction.votes(balance));
-					let now = system::Module::<T>::block_number();
+					let now = system::Pallet::<T>::block_number();
 					let lock_periods = conviction.lock_periods().into();
 					prior.accumulate(now + T::EnactmentPeriod::get() * lock_periods, balance);
 					voting.set_common(delegations, prior);
@@ -1482,13 +1456,13 @@ impl<T: Trait> Module<T> {
 	/// a security hole) but may be reduced from what they are currently.
 	fn update_lock(who: &T::AccountId) {
 		let lock_needed = VotingOf::<T>::mutate(who, |voting| {
-			voting.rejig(system::Module::<T>::block_number());
+			voting.rejig(system::Pallet::<T>::block_number());
 			voting.locked_balance()
 		});
 		if lock_needed.is_zero() {
 			T::Currency::remove_lock(DEMOCRACY_ID, who);
 		} else {
-			T::Currency::set_lock(DEMOCRACY_ID, who, lock_needed, WithdrawReason::Transfer.into());
+			T::Currency::set_lock(DEMOCRACY_ID, who, lock_needed, WithdrawReasons::TRANSFER);
 		}
 	}
 
@@ -1568,7 +1542,8 @@ impl<T: Trait> Module<T> {
 		let preimage = <Preimages<T>>::take(&proposal_hash);
 		if let Some(PreimageStatus::Available { data, provider, deposit, .. }) = preimage {
 			if let Ok(proposal) = T::Proposal::decode(&mut &data[..]) {
-				let _ = T::Currency::unreserve(&provider, deposit);
+				let err_amount = T::Currency::unreserve(&provider, deposit);
+				debug_assert!(err_amount.is_zero());
 				Self::deposit_event(RawEvent::PreimageUsed(proposal_hash, provider, deposit));
 
 				let ok = proposal.dispatch(frame_system::RawOrigin::Root.into()).is_ok();
@@ -1636,6 +1611,7 @@ impl<T: Trait> Module<T> {
 	/// - Db reads per R: `DepositOf`, `ReferendumInfoOf`
 	/// # </weight>
 	fn begin_block(now: T::BlockNumber) -> Result<Weight, DispatchError> {
+		let max_block_weight = T::BlockWeights::get().max_block;
 		let mut weight = 0;
 
 		// pick out another public referendum if it's time.
@@ -1643,7 +1619,7 @@ impl<T: Trait> Module<T> {
 			// Errors come from the queue being empty. we don't really care about that, and even if
 			// we did, there is nothing we can do here.
 			let _ = Self::launch_next(now);
-			weight = T::MaximumBlockWeight::get();
+			weight = max_block_weight;
 		}
 
 		let next = Self::lowest_unbaked();
@@ -1654,7 +1630,7 @@ impl<T: Trait> Module<T> {
 		for (index, info) in Self::maturing_referenda_at_inner(now, next..last).into_iter() {
 			let approved = Self::bake_referendum(now, index, info)?;
 			ReferendumInfoOf::<T>::insert(index, ReferendumInfo::Finished { end: now, approved });
-			weight = T::MaximumBlockWeight::get();
+			weight = max_block_weight;
 		}
 
 		Ok(weight)
@@ -1742,7 +1718,7 @@ impl<T: Trait> Module<T> {
 			.saturating_mul(T::PreimageByteDeposit::get());
 		T::Currency::reserve(&who, deposit)?;
 
-		let now = <frame_system::Module<T>>::block_number();
+		let now = <frame_system::Pallet<T>>::block_number();
 		let a = PreimageStatus::Available {
 			data: encoded_proposal,
 			provider: who.clone(),
@@ -1764,7 +1740,7 @@ impl<T: Trait> Module<T> {
 		let status = Preimages::<T>::get(&proposal_hash).ok_or(Error::<T>::NotImminent)?;
 		let expiry = status.to_missing_expiry().ok_or(Error::<T>::DuplicatePreimage)?;
 
-		let now = <frame_system::Module<T>>::block_number();
+		let now = <frame_system::Pallet<T>>::block_number();
 		let free = <BalanceOf<T>>::zero();
 		let a = PreimageStatus::Available {
 			data: encoded_proposal,

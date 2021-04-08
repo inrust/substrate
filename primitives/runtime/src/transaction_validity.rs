@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -54,6 +54,13 @@ pub enum InvalidTransaction {
 	/// it will only be able to assume a bad signature and cannot express a more meaningful error.
 	BadProof,
 	/// The transaction birth block is ancient.
+	///
+	/// # Possible causes
+	///
+	/// For `FRAME`-based runtimes this would be caused by `current block number
+	/// - Era::birth block number > BlockHashCount`. (e.g. in Polkadot `BlockHashCount` = 2400, so a
+	/// transaction with birth block number 1337 would be valid up until block number 1337 + 2400,
+	/// after which point the transaction would be considered to have an ancient birth block.)
 	AncientBirthBlock,
 	/// The transaction would exhaust the resources of current block.
 	///
@@ -74,18 +81,12 @@ pub enum InvalidTransaction {
 impl InvalidTransaction {
 	/// Returns if the reason for the invalidity was block resource exhaustion.
 	pub fn exhausted_resources(&self) -> bool {
-		match self {
-			Self::ExhaustsResources => true,
-			_ => false,
-		}
+		matches!(self, Self::ExhaustsResources)
 	}
 
 	/// Returns if the reason for the invalidity was a mandatory call failing.
 	pub fn was_mandatory(&self) -> bool {
-		match self {
-			Self::BadMandatory => true,
-			_ => false,
-		}
+		matches!(self, Self::BadMandatory)
 	}
 }
 
@@ -184,18 +185,33 @@ impl From<UnknownTransaction> for TransactionValidityError {
 	}
 }
 
-/// Information on a transaction's validity and, if valid, on how it relates to other transactions.
-pub type TransactionValidity = Result<ValidTransaction, TransactionValidityError>;
-
-impl Into<TransactionValidity> for InvalidTransaction {
-	fn into(self) -> TransactionValidity {
-		Err(self.into())
+#[cfg(feature = "std")]
+impl std::error::Error for TransactionValidityError {
+	fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+		None
 	}
 }
 
-impl Into<TransactionValidity> for UnknownTransaction {
-	fn into(self) -> TransactionValidity {
-		Err(self.into())
+#[cfg(feature = "std")]
+impl std::fmt::Display for TransactionValidityError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		let s: &'static str = (*self).into();
+		write!(f, "{}", s)
+	}
+}
+
+/// Information on a transaction's validity and, if valid, on how it relates to other transactions.
+pub type TransactionValidity = Result<ValidTransaction, TransactionValidityError>;
+
+impl From<InvalidTransaction> for TransactionValidity {
+	fn from(invalid_transaction: InvalidTransaction) -> Self {
+		Err(TransactionValidityError::Invalid(invalid_transaction))
+	}
+}
+
+impl From<UnknownTransaction> for TransactionValidity {
+	fn from(unknown_transaction: UnknownTransaction) -> Self {
+		Err(TransactionValidityError::Unknown(unknown_transaction))
 	}
 }
 
@@ -263,7 +279,7 @@ pub struct ValidTransaction {
 
 impl Default for ValidTransaction {
 	fn default() -> Self {
-		ValidTransaction {
+		Self {
 			priority: 0,
 			requires: vec![],
 			provides: vec![],
@@ -289,7 +305,7 @@ impl ValidTransaction {
 	/// `provides` and `requires` tags, it will sum the priorities, take the minimum longevity and
 	/// the logic *And* of the propagate flags.
 	pub fn combine_with(mut self, mut other: ValidTransaction) -> Self {
-		ValidTransaction {
+		Self {
 			priority: self.priority.saturating_add(other.priority),
 			requires: { self.requires.append(&mut other.requires); self.requires },
 			provides: { self.provides.append(&mut other.provides); self.provides },

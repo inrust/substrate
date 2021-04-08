@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,9 +17,10 @@
 
 //! Stuff to do with the runtime's storage.
 
+use sp_core::storage::ChildInfo;
 use sp_std::prelude::*;
 use codec::{FullCodec, FullEncode, Encode, EncodeLike, Decode};
-use crate::hash::{Twox128, StorageHasher};
+use crate::hash::{Twox128, StorageHasher, ReversibleStorageHasher};
 use sp_runtime::generic::{Digest, DigestItem};
 pub use sp_runtime::TransactionOutcome;
 
@@ -29,6 +30,58 @@ pub mod child;
 #[doc(hidden)]
 pub mod generator;
 pub mod migration;
+pub mod types;
+
+#[cfg(all(feature = "std", any(test, debug_assertions)))]
+mod debug_helper {
+	use std::cell::RefCell;
+
+	thread_local! {
+		static TRANSACTION_LEVEL: RefCell<u32> = RefCell::new(0);
+	}
+
+	pub fn require_transaction() {
+		let level = TRANSACTION_LEVEL.with(|v| *v.borrow());
+		if level == 0 {
+			panic!("Require transaction not called within with_transaction");
+		}
+	}
+
+	pub struct TransactionLevelGuard;
+
+	impl Drop for TransactionLevelGuard {
+		fn drop(&mut self) {
+			TRANSACTION_LEVEL.with(|v| *v.borrow_mut() -= 1);
+		}
+	}
+
+	/// Increments the transaction level.
+	///
+	/// Returns a guard that when dropped decrements the transaction level automatically.
+	pub fn inc_transaction_level() -> TransactionLevelGuard {
+		TRANSACTION_LEVEL.with(|v| {
+			let mut val = v.borrow_mut();
+			*val += 1;
+			if *val > 10 {
+				log::warn!(
+					"Detected with_transaction with nest level {}. Nested usage of with_transaction is not recommended.",
+					*val
+				);
+			}
+		});
+
+		TransactionLevelGuard
+	}
+}
+
+/// Assert this method is called within a storage transaction.
+/// This will **panic** if is not called within a storage transaction.
+///
+/// This assertion is enabled for native execution and when `debug_assertions` are enabled.
+pub fn require_transaction() {
+	#[cfg(all(feature = "std", any(test, debug_assertions)))]
+	debug_helper::require_transaction();
+}
 
 /// Execute the supplied function in a new storage transaction.
 ///
@@ -43,6 +96,10 @@ pub fn with_transaction<R>(f: impl FnOnce() -> TransactionOutcome<R>) -> R {
 	use TransactionOutcome::*;
 
 	start_transaction();
+
+	#[cfg(all(feature = "std", any(test, debug_assertions)))]
+	let _guard = debug_helper::inc_transaction_level();
+
 	match f() {
 		Commit(res) => { commit_transaction(); res },
 		Rollback(res) => { rollback_transaction(); res },
@@ -51,8 +108,7 @@ pub fn with_transaction<R>(f: impl FnOnce() -> TransactionOutcome<R>) -> R {
 
 /// A trait for working with macro-generated storage values under the substrate storage API.
 ///
-/// Details on implementation can be found at
-/// [`generator::StorageValue`]
+/// Details on implementation can be found at [`generator::StorageValue`].
 pub trait StorageValue<T: FullCodec> {
 	/// The type that get/take return.
 	type Query;
@@ -66,8 +122,9 @@ pub trait StorageValue<T: FullCodec> {
 	/// Load the value from the provided storage instance.
 	fn get() -> Self::Query;
 
-	/// Try to get the underlying value from the provided storage instance; `Ok` if it exists,
-	/// `Err` if not.
+	/// Try to get the underlying value from the provided storage instance.
+	///
+	/// Returns `Ok` if it exists, `Err` if not.
 	fn try_get() -> Result<T, ()>;
 
 	/// Translate a value from some previous type (`O`) to the current type.
@@ -144,8 +201,7 @@ pub trait StorageValue<T: FullCodec> {
 
 /// A strongly-typed map in storage.
 ///
-/// Details on implementation can be found at
-/// [`generator::StorageMap`]
+/// Details on implementation can be found at [`generator::StorageMap`].
 pub trait StorageMap<K: FullEncode, V: FullCodec> {
 	/// The type that get/take return.
 	type Query;
@@ -158,6 +214,11 @@ pub trait StorageMap<K: FullEncode, V: FullCodec> {
 
 	/// Load the value associated with the given key from the map.
 	fn get<KeyArg: EncodeLike<K>>(key: KeyArg) -> Self::Query;
+
+	/// Try to get the value for the given key from the map.
+	///
+	/// Returns `Ok` if it exists, `Err` if not.
+	fn try_get<KeyArg: EncodeLike<K>>(key: KeyArg) -> Result<V, ()>;
 
 	/// Swap the values of two keys.
 	fn swap<KeyArg1: EncodeLike<K>, KeyArg2: EncodeLike<K>>(key1: KeyArg1, key2: KeyArg2);
@@ -177,7 +238,9 @@ pub trait StorageMap<K: FullEncode, V: FullCodec> {
 		f: F,
 	) -> Result<R, E>;
 
-	/// Mutate the value under a key. Deletes the item if mutated to a `None`.
+	/// Mutate the value under a key.
+	///
+	/// Deletes the item if mutated to a `None`.
 	fn mutate_exists<KeyArg: EncodeLike<K>, R, F: FnOnce(&mut Option<V>) -> R>(key: KeyArg, f: F) -> R;
 
 	/// Mutate the item, only if an `Ok` value is returned. Deletes the item if mutated to a `None`.
@@ -253,7 +316,7 @@ pub trait IterableStorageMap<K: FullEncode, V: FullCodec>: StorageMap<K, V> {
 	/// By returning `None` from `f` for an element, you'll remove it from the map.
 	///
 	/// NOTE: If a value fail to decode because storage is corrupted then it is skipped.
-	fn translate<O: Decode, F: Fn(K, O) -> Option<V>>(f: F);
+	fn translate<O: Decode, F: FnMut(K, O) -> Option<V>>(f: F);
 }
 
 /// A strongly-typed double map in storage whose secondary keys and values can be iterated over.
@@ -290,7 +353,7 @@ pub trait IterableStorageDoubleMap<
 	/// By returning `None` from `f` for an element, you'll remove it from the map.
 	///
 	/// NOTE: If a value fail to decode because storage is corrupted then it is skipped.
-	fn translate<O: Decode, F: Fn(K1, K2, O) -> Option<V>>(f: F);
+	fn translate<O: Decode, F: FnMut(K1, K2, O) -> Option<V>>(f: F);
 }
 
 /// An implementation of a map with a two keys.
@@ -298,8 +361,7 @@ pub trait IterableStorageDoubleMap<
 /// It provides an important ability to efficiently remove all entries
 /// that have a common first key.
 ///
-/// Details on implementation can be found at
-/// [`generator::StorageDoubleMap`]
+/// Details on implementation can be found at [`generator::StorageDoubleMap`].
 pub trait StorageDoubleMap<K1: FullEncode, K2: FullEncode, V: FullCodec> {
 	/// The type that get/take returns.
 	type Query;
@@ -318,6 +380,14 @@ pub trait StorageDoubleMap<K1: FullEncode, K2: FullEncode, V: FullCodec> {
 
 	/// Load the value associated with the given key from the double map.
 	fn get<KArg1, KArg2>(k1: KArg1, k2: KArg2) -> Self::Query
+	where
+		KArg1: EncodeLike<K1>,
+		KArg2: EncodeLike<K2>;
+
+	/// Try to get the value for the given key from the double map.
+	///
+	/// Returns `Ok` if it exists, `Err` if not.
+	fn try_get<KArg1, KArg2>(k1: KArg1, k2: KArg2) -> Result<V, ()>
 	where
 		KArg1: EncodeLike<K1>,
 		KArg2: EncodeLike<K2>;
@@ -450,6 +520,14 @@ pub struct PrefixIterator<T> {
 	closure: fn(&[u8], &[u8]) -> Result<T, codec::Error>,
 }
 
+impl<T> PrefixIterator<T> {
+	/// Mutate this iterator into a draining iterator; items iterated are removed from storage.
+	pub fn drain(mut self) -> Self {
+		self.drain = true;
+		self
+	}
+}
+
 impl<T> Iterator for PrefixIterator<T> {
 	type Item = T;
 
@@ -463,9 +541,9 @@ impl<T> Iterator for PrefixIterator<T> {
 					let raw_value = match unhashed::get_raw(&self.previous_key) {
 						Some(raw_value) => raw_value,
 						None => {
-							crate::debug::error!(
+							log::error!(
 								"next_key returned a key with no value at {:?}",
-								self.previous_key
+								self.previous_key,
 							);
 							continue
 						}
@@ -477,9 +555,137 @@ impl<T> Iterator for PrefixIterator<T> {
 					let item = match (self.closure)(raw_key_without_prefix, &raw_value[..]) {
 						Ok(item) => item,
 						Err(e) => {
-							crate::debug::error!(
+							log::error!(
 								"(key, value) failed to decode at {:?}: {:?}",
-								self.previous_key, e
+								self.previous_key,
+								e,
+							);
+							continue
+						}
+					};
+
+					Some(item)
+				}
+				None => None,
+			}
+		}
+	}
+}
+
+/// Iterate over a prefix of a child trie and decode raw_key and raw_value into `T`.
+///
+/// If any decoding fails it skips the key and continues to the next one.
+pub struct ChildTriePrefixIterator<T> {
+	/// The prefix iterated on
+	prefix: Vec<u8>,
+	/// child info for child trie
+	child_info: ChildInfo,
+	/// The last key iterated on
+	previous_key: Vec<u8>,
+	/// If true then values are removed while iterating
+	drain: bool,
+	/// Whether or not we should fetch the previous key
+	fetch_previous_key: bool,
+	/// Function that takes `(raw_key_without_prefix, raw_value)` and decode `T`.
+	/// `raw_key_without_prefix` is the raw storage key without the prefix iterated on.
+	closure: fn(&[u8], &[u8]) -> Result<T, codec::Error>,
+}
+
+impl<T> ChildTriePrefixIterator<T> {
+	/// Mutate this iterator into a draining iterator; items iterated are removed from storage.
+	pub fn drain(mut self) -> Self {
+		self.drain = true;
+		self
+	}
+}
+
+impl<T: Decode + Sized> ChildTriePrefixIterator<(Vec<u8>, T)> {
+	/// Construct iterator to iterate over child trie items in `child_info` with the prefix `prefix`.
+	///
+	/// NOTE: Iterator with [`Self::drain`] will remove any value who failed to decode
+	pub fn with_prefix(child_info: &ChildInfo, prefix: &[u8]) -> Self {
+		let prefix = prefix.to_vec();
+		let previous_key = prefix.clone();
+		let closure = |raw_key_without_prefix: &[u8], raw_value: &[u8]| {
+			let value = T::decode(&mut &raw_value[..])?;
+			Ok((raw_key_without_prefix.to_vec(), value))
+		};
+
+		Self {
+			prefix,
+			child_info: child_info.clone(),
+			previous_key,
+			drain: false,
+			fetch_previous_key: true,
+			closure,
+		}
+	}
+}
+
+impl<K: Decode + Sized, T: Decode + Sized> ChildTriePrefixIterator<(K, T)> {
+	/// Construct iterator to iterate over child trie items in `child_info` with the prefix `prefix`.
+	///
+	/// NOTE: Iterator with [`Self::drain`] will remove any key or value who failed to decode
+	pub fn with_prefix_over_key<H: ReversibleStorageHasher>(child_info: &ChildInfo, prefix: &[u8]) -> Self {
+		let prefix = prefix.to_vec();
+		let previous_key = prefix.clone();
+		let closure = |raw_key_without_prefix: &[u8], raw_value: &[u8]| {
+			let mut key_material = H::reverse(raw_key_without_prefix);
+			let key = K::decode(&mut key_material)?;
+			let value = T::decode(&mut &raw_value[..])?;
+			Ok((key, value))
+		};
+
+		Self {
+			prefix,
+			child_info: child_info.clone(),
+			previous_key,
+			drain: false,
+			fetch_previous_key: true,
+			closure,
+		 }
+	}
+}
+
+impl<T> Iterator for ChildTriePrefixIterator<T> {
+	type Item = T;
+
+	fn next(&mut self) -> Option<Self::Item> {
+		loop {
+			let maybe_next = if self.fetch_previous_key {
+				self.fetch_previous_key = false;
+				Some(self.previous_key.clone())
+			} else {
+				sp_io::default_child_storage::next_key(
+					&self.child_info.storage_key(),
+					&self.previous_key,
+				)
+					.filter(|n| n.starts_with(&self.prefix))
+			};
+			break match maybe_next {
+				Some(next) => {
+					self.previous_key = next;
+					let raw_value = match child::get_raw(&self.child_info, &self.previous_key) {
+						Some(raw_value) => raw_value,
+						None => {
+							log::error!(
+								"next_key returned a key with no value at {:?}",
+								self.previous_key,
+							);
+							continue
+						}
+					};
+					if self.drain {
+						child::kill(&self.child_info, &self.previous_key)
+					}
+					let raw_key_without_prefix = &self.previous_key[self.prefix.len()..];
+					let item = match (self.closure)(raw_key_without_prefix, &raw_value[..]) {
+						Ok(item) => item,
+						Err(e) => {
+							log::error!(
+								"(key, value) failed to decode at {:?}: {:?}",
+								self.previous_key,
+								e,
 							);
 							continue
 						}
@@ -545,7 +751,7 @@ pub trait StoragePrefixedMap<Value: FullCodec> {
 	/// # Usage
 	///
 	/// This would typically be called inside the module implementation of on_runtime_upgrade.
-	fn translate_values<OldValue: Decode, F: Fn(OldValue) -> Option<Value>>(f: F) {
+	fn translate_values<OldValue: Decode, F: FnMut(OldValue) -> Option<Value>>(mut f: F) {
 		let prefix = Self::final_prefix();
 		let mut previous_key = prefix.clone().to_vec();
 		while let Some(next) = sp_io::storage::next_key(&previous_key)
@@ -559,9 +765,9 @@ pub trait StoragePrefixedMap<Value: FullCodec> {
 					None => unhashed::kill(&previous_key),
 				},
 				None => {
-					crate::debug::error!(
+					log::error!(
 						"old key failed to decode at {:?}",
-						previous_key
+						previous_key,
 					);
 					continue
 				},
@@ -619,6 +825,7 @@ impl<Hash: Encode> StorageAppend<DigestItem<Hash>> for Digest<Hash> {}
 mod test {
 	use super::*;
 	use sp_core::hashing::twox_128;
+	use crate::hash::Identity;
 	use sp_io::TestExternalities;
 	use generator::StorageValue as _;
 
@@ -730,6 +937,103 @@ mod test {
 				logs: vec![DigestItem::ChangesTrieRoot(1), DigestItem::Other(Vec::new())],
 			};
 			assert_eq!(Digest::decode(&mut &value[..]).unwrap(), expected);
+		});
+	}
+
+	#[test]
+	#[should_panic(expected = "Require transaction not called within with_transaction")]
+	fn require_transaction_should_panic() {
+		TestExternalities::default().execute_with(|| {
+			require_transaction();
+		});
+	}
+
+	#[test]
+	fn require_transaction_should_not_panic_in_with_transaction() {
+		TestExternalities::default().execute_with(|| {
+			with_transaction(|| {
+				require_transaction();
+				TransactionOutcome::Commit(())
+			});
+
+			with_transaction(|| {
+				require_transaction();
+				TransactionOutcome::Rollback(())
+			});
+		});
+	}
+
+	#[test]
+	fn child_trie_prefixed_map_works() {
+		TestExternalities::default().execute_with(|| {
+			let child_info_a = child::ChildInfo::new_default(b"a");
+			child::put(&child_info_a, &[1, 2, 3], &8u16);
+			child::put(&child_info_a, &[2], &8u16);
+			child::put(&child_info_a, &[2, 1, 3], &8u8);
+			child::put(&child_info_a, &[2, 2, 3], &8u16);
+			child::put(&child_info_a, &[3], &8u16);
+
+			assert_eq!(
+				ChildTriePrefixIterator::with_prefix(&child_info_a, &[2])
+					.collect::<Vec<(Vec<u8>, u16)>>(),
+				vec![
+					(vec![], 8),
+					(vec![2, 3], 8),
+				],
+			);
+
+			assert_eq!(
+				ChildTriePrefixIterator::with_prefix(&child_info_a, &[2])
+					.drain()
+					.collect::<Vec<(Vec<u8>, u16)>>(),
+				vec![
+					(vec![], 8),
+					(vec![2, 3], 8),
+				],
+			);
+
+			// The only remaining is the ones outside prefix
+			assert_eq!(
+				ChildTriePrefixIterator::with_prefix(&child_info_a, &[])
+					.collect::<Vec<(Vec<u8>, u8)>>(),
+				vec![
+					(vec![1, 2, 3], 8),
+					(vec![3], 8),
+				],
+			);
+
+			child::put(&child_info_a, &[1, 2, 3], &8u16);
+			child::put(&child_info_a, &[2], &8u16);
+			child::put(&child_info_a, &[2, 1, 3], &8u8);
+			child::put(&child_info_a, &[2, 2, 3], &8u16);
+			child::put(&child_info_a, &[3], &8u16);
+
+			assert_eq!(
+				ChildTriePrefixIterator::with_prefix_over_key::<Identity>(&child_info_a, &[2])
+					.collect::<Vec<(u16, u16)>>(),
+				vec![
+					(u16::decode(&mut &[2, 3][..]).unwrap(), 8),
+				],
+			);
+
+			assert_eq!(
+				ChildTriePrefixIterator::with_prefix_over_key::<Identity>(&child_info_a, &[2])
+					.drain()
+					.collect::<Vec<(u16, u16)>>(),
+				vec![
+					(u16::decode(&mut &[2, 3][..]).unwrap(), 8),
+				],
+			);
+
+			// The only remaining is the ones outside prefix
+			assert_eq!(
+				ChildTriePrefixIterator::with_prefix(&child_info_a, &[])
+					.collect::<Vec<(Vec<u8>, u8)>>(),
+				vec![
+					(vec![1, 2, 3], 8),
+					(vec![3], 8),
+				],
+			);
 		});
 	}
 }

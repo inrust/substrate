@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -41,7 +41,7 @@ use frame_support::{
 	weights::{Weight, DispatchClass},
 	traits::{
 		Currency, ExistenceRequirement, Get, LockableCurrency, LockIdentifier, BalanceStatus,
-		OnUnbalanced, ReservableCurrency, WithdrawReason, WithdrawReasons, ChangeMembers,
+		OnUnbalanced, ReservableCurrency, WithdrawReasons, ChangeMembers,
 	}
 };
 use codec::{Encode, Decode};
@@ -139,9 +139,9 @@ pub const VOTER_SET_SIZE: usize = 64;
 /// NUmber of approvals grouped in one chunk.
 pub const APPROVAL_SET_SIZE: usize = 8;
 
-type BalanceOf<T> = <<T as Trait>::Currency as Currency<<T as frame_system::Trait>::AccountId>>::Balance;
+type BalanceOf<T> = <<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
 type NegativeImbalanceOf<T> =
-	<<T as Trait>::Currency as Currency<<T as frame_system::Trait>::AccountId>>::NegativeImbalance;
+	<<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::NegativeImbalance;
 
 /// Index used to access chunks.
 type SetIndex = u32;
@@ -152,8 +152,8 @@ type ApprovalFlag = u32;
 /// Number of approval flags that can fit into [`ApprovalFlag`] type.
 const APPROVAL_FLAG_LEN: usize = 32;
 
-pub trait Trait: frame_system::Trait {
-	type Event: From<Event<Self>> + Into<<Self as frame_system::Trait>::Event>;
+pub trait Config: frame_system::Config {
+	type Event: From<Event<Self>> + Into<<Self as frame_system::Config>::Event>;
 
 	/// Identifier for the elections pallet's lock
 	type ModuleId: Get<LockIdentifier>;
@@ -218,7 +218,7 @@ pub trait Trait: frame_system::Trait {
 }
 
 decl_storage! {
-	trait Store for Module<T: Trait> as Elections {
+	trait Store for Module<T: Config> as Elections {
 		// ---- parameters
 
 		/// How long to give each top candidate to present themselves after the vote ends.
@@ -286,7 +286,7 @@ decl_storage! {
 
 decl_error! {
 	/// Error for the elections module.
-	pub enum Error for Module<T: Trait> {
+	pub enum Error for Module<T: Config> {
 		/// Reporter must be a voter.
 		NotVoter,
 		/// Target for inactivity cleanup must be active.
@@ -345,7 +345,7 @@ decl_error! {
 }
 
 decl_module! {
-	pub struct Module<T: Trait> for enum Call where origin: T::Origin {
+	pub struct Module<T: Config> for enum Call where origin: T::Origin {
 		type Error = Error<T>;
 
 		/// How much should be locked up in order to submit one's candidacy. A reasonable
@@ -706,20 +706,20 @@ decl_module! {
 }
 
 decl_event!(
-	pub enum Event<T> where <T as frame_system::Trait>::AccountId {
+	pub enum Event<T> where <T as frame_system::Config>::AccountId {
 		/// Reaped \[voter, reaper\].
 		VoterReaped(AccountId, AccountId),
 		/// Slashed \[reaper\].
 		BadReaperSlashed(AccountId),
 		/// A tally (for approval votes of \[seats\]) has started.
 		TallyStarted(u32),
-		/// A tally (for approval votes of seat(s)) has ended (with one or more new members). 
+		/// A tally (for approval votes of seat(s)) has ended (with one or more new members).
 		/// \[incoming, outgoing\]
 		TallyFinalized(Vec<AccountId>, Vec<AccountId>),
 	}
 );
 
-impl<T: Trait> Module<T> {
+impl<T: Config> Module<T> {
 	// exposed immutables.
 
 	/// True if we're currently in a presentation period.
@@ -759,7 +759,7 @@ impl<T: Trait> Module<T> {
 					// if there's a tally in progress, then next tally can begin immediately afterwards
 					(tally_end, c.len() - leavers.len() + comers as usize, comers)
 				} else {
-					(<frame_system::Module<T>>::block_number(), c.len(), 0)
+					(<frame_system::Pallet<T>>::block_number(), c.len(), 0)
 				};
 			if count < desired_seats as usize {
 				Some(next_possible)
@@ -871,7 +871,7 @@ impl<T: Trait> Module<T> {
 						let imbalance = T::Currency::withdraw(
 							&who,
 							T::VotingFee::get(),
-							WithdrawReason::Fee.into(),
+							WithdrawReasons::FEE,
 							ExistenceRequirement::KeepAlive,
 						)?;
 						T::BadVoterIndex::on_unbalanced(imbalance);
@@ -914,7 +914,7 @@ impl<T: Trait> Module<T> {
 	fn start_tally() {
 		let members = Self::members();
 		let desired_seats = Self::desired_seats() as usize;
-		let number = <frame_system::Module<T>>::block_number();
+		let number = <frame_system::Pallet<T>>::block_number();
 		let expiring =
 			members.iter().take_while(|i| i.1 <= number).map(|i| i.0.clone()).collect::<Vec<_>>();
 		let retaining_seats = members.len() - expiring.len();
@@ -942,7 +942,7 @@ impl<T: Trait> Module<T> {
 				.ok_or("finalize can only be called after a tally is started.")?;
 		let leaderboard: Vec<(BalanceOf<T>, T::AccountId)> = <Leaderboard<T>>::take()
 			.unwrap_or_default();
-		let new_expiry = <frame_system::Module<T>>::block_number() + Self::term_duration();
+		let new_expiry = <frame_system::Pallet<T>>::block_number() + Self::term_duration();
 
 		// return bond to winners.
 		let candidacy_bond = T::CandidacyBond::get();
